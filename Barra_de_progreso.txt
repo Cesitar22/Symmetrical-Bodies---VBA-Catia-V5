@@ -1,0 +1,12 @@
+Private Sub LabelProgress_Click()
+    LabelProgress.Width = 0
+    lblStatus.Caption = "0%"
+End Sub
+Public Sub UpdateProgress(percent As Double)
+    Dim frameWidth As Double
+    If percent < 0 Then percent = 0
+    If percent > 100 Then percent = 100
+    frameWidth = Fondo.Width
+    LabelProgress.Width = frameWidth * (percent / 100)
+    lblStatus.Caption = Format(percent, "0.0") & "%"
+End Sub

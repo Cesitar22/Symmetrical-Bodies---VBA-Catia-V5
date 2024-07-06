@@ -1,0 +1,266 @@
+'Macro realizada por César Eduardo Jiménez Gámez en Julio de 2024
+
+'Esta macro genera todos los P/N simétricos indicados en un excel con respecto al plano ZX de un conjunto de CATParts que se
+'encuentren dentro de un modelo
+
+'Estructura del árbol: 1 producto raíz; infinitos subproductos anidados unos dentro de otros y los CATParts en el último nivel
+
+'Esta macro comienza poniendo en modo diseño el product raíz abierto; para no demorar mucho el proceso al poner en modo diseño
+'la maqueta, se recomienda crear un Product temporal con todos los simétricos a obtener.
+
+Public contador
+Public reemplazar
+Public lastRow As Long
+Public Path As String
+Public miCATIA As Object
+Public vector_simetricos() As Variant
+Public rootProduct As Product
+Public productDocument As productDocument
+
+Sub CATMain()
+
+    Set productDocument = CATIA.ActiveDocument
+    Set rootProduct = productDocument.Product
+    Set miCATIA = GetObject(, "CATIA.Application")
+    rootProduct.ApplyWorkMode DESIGN_MODE
+    ReDim vector_simetricos(1 To 1)
+    contador = 0
+    reemplazar = 0
+
+    Dim excelApp As Object
+    Dim excelWorkbook As Object
+    Dim excelWorksheet As Object
+   
+    Dim filePath As String
+    filePath = InputBox("Por favor, ingresa la ruta del archivo de Excel:", "Ruta del archivo de Excel")
+   
+    Barra_progreso.Show vbModeless
+   
+    Set excelApp = CreateObject("Excel.Application")
+    Set excelWorkbook = excelApp.Workbooks.Open(filePath)
+    Set excelWorksheet = excelWorkbook.Sheets("PN_symmetry")
+
+    lastRow = excelWorksheet.Cells(excelWorksheet.Rows.Count, 1).End(-4162).row
+   
+    ExploreSubProducts rootProduct, excelWorksheet, lastRow, productDocument
+
+    excelWorkbook.Close False
+    Set excelWorkbook = Nothing
+    Set excelApp = Nothing
+   
+    If contador > 0 Then
+        'MsgBox "Se han creado todas las piezas simétricas indicadas."
+    ElseIf contador = 0 Then
+        'MsgBox "No se ha creado ninguna pieza simétrica."
+    End If
+   
+    If reemplazar = 1 Then
+        'MsgBox "Se han reemplazado algunos P/N simétricos que ya existían."
+    End If
+    Unload Barra_progreso
+   
+    ReDim Preserve vector_simetricos(1 To UBound(vector_simetricos) - 1)
+    Crear_product_simetricos
+   
+End Sub
+
+Sub ExploreSubProducts(ByVal currentProduct As Product, ByVal excelWorksheet As Object, ByVal lastRow As Long, productDocument As productDocument)
+    Dim subProduct As Product
+    For Each subProduct In currentProduct.Products
+        If subProduct.Products.Count > 0 Then
+            ExploreSubProducts subProduct, excelWorksheet, lastRow, productDocument
+        ElseIf subProduct.Products.Count = 0 Then
+            On Error Resume Next
+            Dim parte As part
+            Set parte = subProduct.ReferenceProduct.Parent.part
+            If Not parte Is Nothing Then
+                CheckNameInExcel parte.Name, excelWorksheet, lastRow, parte, productDocument
+            End If
+            On Error GoTo 0
+        End If
+    Next
+End Sub
+
+Sub CheckNameInExcel(partName As String, excelWorksheet As Object, lastRow As Long, parte As part, productDocument As productDocument)
+    Dim i As Long
+    Dim cellValue As String
+
+    For i = 1 To lastRow
+        Barra_progreso.UpdateProgress ((i - 1) / (lastRow - 1) * 100)
+        cellValue = excelWorksheet.Cells(i, 1).Value
+        If partName = cellValue Then
+            nombre_sym = excelWorksheet.Cells(i, 2).Value
+            If nombre_sym <> "" Then
+                contador = contador + 1
+                Hacer_simetrico parte, productDocument, nombre_sym
+                vector_simetricos(UBound(vector_simetricos)) = nombre_sym
+                ReDim Preserve vector_simetricos(1 To UBound(vector_simetricos) + 1)
+            End If
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+Sub Hacer_simetrico(parte As part, productDocument As productDocument, nombre_sym)
+    Dim selection As selection
+    Set selection = productDocument.selection
+    Dim visProperties As VisPropertySet
+    Set visProperties = selection.visProperties
+    Dim red As Long, green As Long, blue As Long
+       
+    '1// PARTBODY EN MODO DISEÑO, COPIAR PARTBODY Y OBTENER SU COLOR
+    selection.Clear
+    Dim partBody As body
+    CATIA.Documents.Item(parte.Name & ".CATPart").Activate
+    Set partBody = CATIA.Documents.Item(parte.Name & ".CATPart").part.Bodies.Item("PartBody")
+    selection.Add partBody
+    visProperties.GetRealColor red, green, blue
+    On Error GoTo ErrorHandler
+    selection.Copy
+    On Error GoTo 0
+    selection.Clear
+       
+    '2// CREACIÓN DE NUEVO CATPART EN LA CARPETA CON EL NOMBRE ADECUADO
+    Dim partdoc As partDocument
+    Set partdoc = parte.Parent
+    Path = partdoc.Path
+    Dim NewPartName As String
+    NewPartName = Path & "\" & nombre_sym & ".CATPart"
+    Dim respuesta As VbMsgBoxResult
+    If Dir(NewPartName) <> "" Then
+        'respuesta = MsgBox("Se va a sobreescribir la anterior versión del simétrico de la pieza " & parte.Name & ". ¿Desea continuar?", vbQuestion + vbYesNo, "Advertencia")
+        'If respuesta = vbYes Then
+            reemplazar = 1
+            Kill NewPartName
+        'Else
+        '    Exit Sub
+        'End If
+    End If
+    Dim NewPartDoc As partDocument
+    Set NewPartDoc = miCATIA.Documents.Add("Part")
+    Dim parte2 As part
+    Set parte2 = NewPartDoc.Product.Parent.part
+    Dim ejes As AxisSystem
+    Set ejes = NewPartDoc.part.AxisSystems.Item("Absolute Axis System")
+    hide parte2, ejes
+    NewPartDoc.Product.PartNumber = nombre_sym
+       
+    '3// PASTE SPECIAL AS RESULT WITH LINK
+    selection.Clear
+    Set partbody2 = parte2.Bodies.Item(1)
+    selection.Add partbody2
+    selection.PasteSpecial ("CATPrtResult")
+    selection.Clear
+       
+    '4// HACER OPERACION DE SIMETRIA
+    Dim Plano_ZX As HybridShapePlaneExplicit
+    Set Plano_ZX = parte2.OriginElements.PlaneZX
+    Dim plano_simetria As Reference
+    Set plano_simetria = parte2.CreateReferenceFromObject(Plano_ZX)
+    Dim symmetry As symmetry
+    Set symmetry = parte2.shapeFactory.AddNewSymmetry2(plano_simetria)
+    Dim hybridShapeSymmetry As hybridShapeSymmetry
+    Set hybridShapeSymmetry = symmetry.HybridShape
+    parte2.InWorkObject = hybridShapeSymmetry
+    parte2.Update
+       
+    '5// DEFINE IN WORK OBJECT EN EL PART BODY DE NUEVO
+    selection.Clear
+    selection.Add partbody2
+    parte2.InWorkObject = partbody2
+    selection.Clear
+       
+    '6// CHANGE PARTBODY EN EL CATPART SIMETRICO
+    Dim body1 As body
+    Set body1 = parte2.Bodies.Item(1)
+    Dim body2 As body
+    Set body2 = parte2.Bodies.Item(2)
+    parte2.MainBody = body2
+    parte2.Update
+           
+    '7//ELIMINAR EL BODY 2 VACÍO DEL CATPART SIMETRICO
+    selection.Clear
+    Dim body3 As body
+    Set body3 = parte2.Bodies.Item(1)
+    selection.Add body3
+    selection.Delete
+    selection.Clear
+       
+    '8//DAR COLOR AL PARTBODY DEL CATPART SIMETRICO
+    Dim Rojo As Integer, Verde As Integer, Azul As Integer
+    Rojo = red
+    Verde = green
+    Azul = blue
+    dar_color_part Rojo, Verde, Azul, parte2, selection
+       
+    '9// ELIMINAR GEOM_SET, DEFINE IN WORK OBJECT, ACTUALIZAR, GUARDAR Y CERRAR EL CATPART SIMETRICO
+    parte2.InWorkObject = parte2.Bodies.Item(1)
+    parte2.Update
+    NewPartDoc.SaveAs NewPartName
+    NewPartDoc.Close
+   
+    Exit Sub
+ErrorHandler:
+        MsgBox "Ha ocurrido un error. La macro va a detenerse cuando cliques este botón; asegúrate de hacer lo siguiente antes de ejecutarla otra vez:" & vbCrLf & _
+        "- Verifica que tiene seleccionado el Product Raiz en azul oscuro, es decir, que está activado.", vbExclamation, "Error"
+    On Error GoTo 0
+    End
+   
+End Sub
+
+Sub hide(part As part, Item)
+   
+    Dim productDocument As partDocument
+    Set productDocument = CATIA.ActiveDocument
+    Dim selection As selection
+    Set selection = productDocument.selection
+    Dim estado_visibilidad As CatVisPropertyShow
+    selection.Clear
+    selection.Add Item
+    selection.visProperties.GetShow estado_visibilidad
+    If estado_visibilidad = catVisPropertyShowAttr Then
+        selection.visProperties.SetShow (catVisPropertyNoShowAttr)
+    End If
+    selection.Clear
+    part.Update
+   
+End Sub
+
+Sub dar_color_part(Rojo As Integer, Verde As Integer, Azul As Integer, part As part, selection)
+    Set partBody = part.Bodies.Item(1)
+    selection.Clear
+    selection.Add partBody
+    selection.visProperties.SetRealColor Rojo, Verde, Azul, 0
+    selection.Clear
+End Sub
+
+Sub Crear_product_simetricos()
+    Dim nombre_producto As String
+    nombre_producto = "PRODUCT_SIMETRICOS"
+    Dim NewProductName As String
+    NewProductName = Path & "\" & nombre_producto & ".CATProduct"
+    Dim NewProductDoc As productDocument
+    Set NewProductDoc = miCATIA.Documents.Add("Product")
+    NewProductDoc.Product.PartNumber = nombre_producto
+    If Dir(NewProductName) <> "" Then
+        Kill NewProductName
+    End If
+    meter_parts_simetricos_en_el_arbol NewProductDoc
+    NewProductDoc.SaveAs NewProductName
+    NewProductDoc.Close
+    Dim arrayOfVariantOfBSTR(0)
+    arrayOfVariantOfBSTR(0) = NewProductName
+    Set productsVariant = rootProduct.Products
+    productsVariant.AddComponentsFromFiles arrayOfVariantOfBSTR, "All"
+End Sub
+
+Sub meter_parts_simetricos_en_el_arbol(NewProductDoc As productDocument)
+    Set products_sym = NewProductDoc.Product.Products
+    Dim elemento_simetrico As Variant
+    For Each elemento_simetrico In vector_simetricos
+        Dim arrayOfVariantOfBSTR1(0)
+        arrayOfVariantOfBSTR1(0) = Path & "\" & elemento_simetrico & ".CATPart"
+        Set productsVariant1 = products_sym
+        productsVariant1.AddComponentsFromFiles arrayOfVariantOfBSTR1, "All"
+    Next
+End Sub
